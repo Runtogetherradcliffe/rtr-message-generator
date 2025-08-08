@@ -314,3 +314,139 @@ st.subheader("Preview messages")
 st.text_area("Generated message", value=preview, height=420, key="preview_text")
 
 st.download_button("Download message as .txt", data=preview, file_name=f"RTR_{selected_label.replace(' ','_')}_{platform}.txt", mime="text/plain", key="download_btn")
+
+
+# ---------------- PARKRUN SHOUT-OUTS (isolated, safe) ----------------
+import random as _pr_random
+from datetime import datetime as _pr_datetime, timedelta as _pr_timedelta
+
+try:
+    from bs4 import BeautifulSoup as _pr_BeautifulSoup  # provided by 'beautifulsoup4'
+except Exception:
+    _pr_BeautifulSoup = None
+
+import requests as _pr_requests
+
+def _pr_tab():
+    st.markdown("## Parkrun Shout-outs")
+
+    if _pr_BeautifulSoup is None:
+        st.error("BeautifulSoup not available. Make sure 'beautifulsoup4' is in requirements.txt, then restart the app.")
+        return
+
+    # Default to last Saturday
+    today = _pr_datetime.now()
+    days_since_sat = (today.weekday() - 5) % 7
+    last_sat = today - _pr_timedelta(days=days_since_sat)
+    date_choice = st.date_input("Select parkrun date", value=last_sat, key="pr_date")
+
+    check_course_pbs = st.checkbox("Check course PBs (slower)", value=False, key="pr_course_pb")
+
+    platform = st.selectbox("Platform", ["WhatsApp", "Facebook", "Instagram", "Email"], key="pr_platform")
+    if "pr_shuffle_seed" not in st.session_state:
+        st.session_state["pr_shuffle_seed"] = _pr_random.randint(0, 1_000_000)
+    if st.button("Shuffle wording", key="pr_shuffle"):
+        st.session_state["pr_shuffle_seed"] = _pr_random.randint(0, 1_000_000)
+
+    if st.button("Fetch shout-outs", key="pr_fetch"):
+        try:
+            results = _pr_fetch_data(date_choice, check_course_pbs)
+        except Exception as e:
+            st.error(f"Error fetching parkrun data: {e}")
+            return
+
+        if not results:
+            st.info("No results found for that date.")
+            return
+
+        message = _pr_make_message(results, platform, st.session_state["pr_shuffle_seed"])
+        st.text_area("Preview message", value=message, height=420, key="pr_preview")
+
+def _pr_fetch_data(date_choice, check_course_pbs=False):
+    url = f"https://www.parkrun.com/results/consolidatedclub/?clubNum=49581&eventDate={date_choice.strftime('%Y-%m-%d')}"
+    headers = {"User-Agent": "RTR-Message-Generator/1.0"}
+    r = _pr_requests.get(url, headers=headers, timeout=30)
+    r.raise_for_status()
+
+    soup = _pr_BeautifulSoup(r.text, "html.parser")
+    table = soup.find("table", class_="Results")
+    if not table:
+        return []
+
+    out = []
+    for tr in table.find_all("tr")[1:]:
+        tds = tr.find_all("td")
+        if len(tds) < 7:
+            continue
+
+        def txt(i):
+            try:
+                return tds[i].get_text(strip=True)
+            except Exception:
+                return ""
+
+        name   = txt(0)
+        event  = txt(1)
+        time   = txt(3)
+        note   = txt(6)
+
+        if not name or not event:
+            continue
+
+        ach = []
+        if "PB" in note:
+            ach.append("parkrun PB")
+        if "First timer" in note:
+            ach.append("First time at this event")
+
+        if check_course_pbs:
+            pass
+
+        out.append({"name": name, "event": event, "time": time or "—", "achievements": ach})
+
+    return out
+
+def _pr_make_message(results, platform, seed=None):
+    _pr_random.seed(seed or 0)
+    intros = {
+        "Facebook": [
+            "🌟 Huge congrats to our parkrunners this week!",
+            "👏 Another Saturday, another set of cracking runs!",
+        ],
+        "Instagram": [
+            "💥 Saturday vibes from the RTR crew!",
+            "🏃‍♀️ Weekend miles, big smiles!",
+        ],
+        "WhatsApp": [
+            "*Shout‑out time!* 🏆 Here’s what our parkrunners got up to:",
+            "*Saturday success stories* 👏",
+        ],
+        "Email": [
+            "Here are this week's parkrun highlights:",
+            "Celebrating our runners' parkrun achievements this week:",
+        ],
+    }
+    outro_by_platform = {
+        "Facebook": "\n\nGot a photo? Drop it below! 📸",
+        "Instagram": "\n\nTag us and share your snaps 📸 #RunTogetherRadcliffe",
+        "WhatsApp": "\n\nGot pics? Share them in the chat!",
+        "Email": "\n\nSee you next Saturday,",
+    }
+
+    intro = _pr_random.choice(intros.get(platform, intros["Facebook"]))
+    lines = [intro, ""]
+    for r in results:
+        a = ", ".join(r["achievements"]) if r["achievements"] else "completed the course"
+        lines.append(f"- {r['name']} at {r['event']} in {r['time']} ({a})")
+    lines.append(outro_by_platform.get(platform, ""))
+    return "\n".join(lines)
+
+# Try to mount as a second tab; if tabs already exist, fall back to an expander
+try:
+    _tab1, _tab2 = st.tabs(["Thursday Run Messages", "Parkrun Shout-outs"])
+    with _tab2:
+        _pr_tab()
+except Exception:
+    with st.expander("Parkrun Shout-outs", expanded=False):
+        _pr_tab()
+
