@@ -1,3 +1,1 @@
-# RTR Message Generator (fixed)
-
-This build adds NaN-safe cell handling to avoid AttributeError on blank cells.
+RTR Message Generator — future dates; 8k/5k bullets (+ Jeff it! on 5k); platform-specific wording + shuffle; RESTORED special events + RTR on tour map link.
