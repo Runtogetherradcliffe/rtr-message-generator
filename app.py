@@ -1,14 +1,25 @@
 """
 RunTogether Radcliffe – Weekly Message Generator (Streamlit)
 
-This version includes NaN-safe handling for spreadsheet cells to prevent
-AttributeError on weeks where cells are blank (e.g., Special events).
+Now with:
+- **Strava** distance (km) + elevation (m) fetched per route (with manual fallback)
+- **LocationIQ** on‑route landmarks/POIs from the Strava polyline (optional toggle)
+- Rich, varied copy; WhatsApp/FB/IG/Email formatting; after‑dark safety notes
+- Admin page for OAuth + diagnostics
+- NaN‑safe spreadsheet parsing
+
+Spreadsheet expected at: `data/RTR route schedule.xlsx` (sheet: `schedule`).
+Columns: Week, Date, Special events, Notes, Meeting point, Meeting point google link,
+         8k Route, 8k Strava link, 5k Route, 5k Strava link
+
+Secrets (Streamlit Cloud → App → Settings → Secrets):
+  STRAVA_CLIENT_ID, STRAVA_CLIENT_SECRET, STRAVA_REFRESH_TOKEN (after OAuth),
+  LOCATIONIQ_API_KEY, ADMIN_PASS
+
 """
 
 from __future__ import annotations
 import os
-import json
-import time
 import random
 from dataclasses import dataclass
 from datetime import datetime, date, timedelta
@@ -24,7 +35,6 @@ from dateutil import tz
 # =============================
 
 def get_secret(key: str, default: Optional[str] = None) -> Optional[str]:
-    """Read from st.secrets if present, otherwise env vars (for easy Render port)."""
     try:
         if key in st.secrets:
             return st.secrets[key]
@@ -32,11 +42,11 @@ def get_secret(key: str, default: Optional[str] = None) -> Optional[str]:
         pass
     return os.environ.get(key, default)
 
-# =============================
-# Constants & helpers
-# =============================
 UK_TZ = tz.gettz("Europe/London")
 
+# =============================
+# Copy variety helpers
+# =============================
 ELEVATION_TEXT_CHOICES = [
     (0, 20, [
         "flat as a pancake 🥞",
@@ -68,30 +78,79 @@ def seeded_choice(options: List[str], seed: str, tag: str) -> str:
     rnd = random.Random(f"{seed}:{tag}")
     return rnd.choice(options)
 
+
 def describe_elevation(total_elev_m: float, *, seed: str = "") -> str:
     for lo, hi, choices in ELEVATION_TEXT_CHOICES:
         if lo <= total_elev_m < hi:
             return seeded_choice(choices, seed, f"elev_{lo}_{hi}")
     return "varied terrain"
 
+GREETINGS = [
+    "👋 Hope you're having a great week!",
+    "Hey team!",
+    "Hiya!",
+    "Evening crew!",
+    "Hello runners!",
+    "Ready to run?",
+]
+THURSDAY_LEADS = [
+    "Here's what's lined up for Thursday…",
+    "Thursday's nearly here – time to lace up!",
+    "Fancy a Thursday run? Here's the plan…",
+    "This week's routes are looking good:",
+    "Two routes ready for you this Thursday:",
+]
+ROUTE_INTROS_GENERAL = [
+    "🛣️ This week we’ve got two route options to choose from:",
+    "🗺️ Pick your route – two options this week:",
+    "🏃 Two choices – take your pick:",
+    "📍 Two routes on offer this Thursday:",
+]
+TRAIL_INTROS = [
+    "🌿 Summer trails are calling – expect softer ground and scenery!",
+    "🌳 Trail time! Let's enjoy the paths while the light lasts.",
+    "🟢 Trails this week – watch your footing and enjoy the views.",
+]
+ROAD_INTROS = [
+    "🚦 It's road time as the evenings draw in.",
+    "💡 Running after dark means roads this week.",
+    "🛣️ Sticking to the roads tonight for safety.",
+]
+SAFETY_NOTES = [
+    "If you’re able to join us, please ensure you have your lights with you and wear hi-vis clothing.",
+    "Please bring a headtorch and wear hi-vis so we can all be seen.",
+    "Pack your lights and pop on some hi‑vis for the darker miles, please.",
+]
+OUTROS = [
+    "👟 Grab your shoes, bring your smiles – see you Thursday!",
+    "See you at 7:00pm – let's make it a good one!",
+    "Bring a mate, say hello, and enjoy the miles!",
+    "Happy running – see you soon!",
+]
+EVENT_TEMPLATES = {
+    "Social after the run": [
+        "🍻 After the run, many of us are going for drinks and food at the market – come along for a friendly social!",
+        "🍻 Post‑run social at the market – come for a drink and a bite!",
+    ],
+    "Wear it green": [
+        "🟩 It's Mental Health Awareness Week – we're encouraging everyone to wear something green. Afterwards, join us at the market for a relaxed social.",
+        "🟩 Wear something green for Mental Health Awareness Week, and stick around after for a market social.",
+    ],
+    "Pride": [
+        "🏳️‍🌈 Our Pride Run coincides with Manchester Pride – wear something colourful and show your support!",
+        "🏳️‍🌈 Pride week! Bring the colour and the good vibes.",
+    ],
+}
+
+# =============================
+# Utilities
+# =============================
+
 def next_thursday(today: Optional[date] = None) -> date:
     today = today or datetime.now(UK_TZ).date()
-    days_ahead = (3 - today.weekday()) % 7  # Monday=0 ... Thursday=3
+    days_ahead = (3 - today.weekday()) % 7
     return today + timedelta(days=days_ahead)
 
-def cell_text(row: pd.Series, key: str, default: str = "") -> str:
-    """Safely extract text from a row; returns '' for NaN/None."""
-    try:
-        val = row.get(key, default)
-    except Exception:
-        val = default
-    if pd.isna(val) or val is None:
-        return default
-    return str(val).strip()
-
-# =============================
-# Sheet loading & parsing
-# =============================
 @st.cache_data(show_spinner=False, ttl=600)
 def load_schedule(path: str = "data/RTR route schedule.xlsx") -> pd.DataFrame:
     df = pd.read_excel(path, sheet_name="schedule")
@@ -105,8 +164,19 @@ def load_schedule(path: str = "data/RTR route schedule.xlsx") -> pd.DataFrame:
     df['Date'] = pd.to_datetime(df['Date']).dt.date
     return df
 
+# Safe cell read
+
+def cell_text(row: pd.Series, key: str, default: str = "") -> str:
+    try:
+        val = row[key]
+    except Exception:
+        val = default
+    if pd.isna(val) or val is None:
+        return default
+    return str(val).strip()
+
 # =============================
-# Strava API
+# Strava
 # =============================
 STRAVA_BASE = "https://www.strava.com/api/v3"
 
@@ -120,13 +190,11 @@ class StravaRoute:
 
 @st.cache_data(show_spinner=False, ttl=60*60*24)
 def strava_exchange_refresh(refresh_token: str) -> Dict:
-    client_id = get_secret("STRAVA_CLIENT_ID")
-    client_secret = get_secret("STRAVA_CLIENT_SECRET")
     r = requests.post(
         "https://www.strava.com/oauth/token",
         data={
-            "client_id": client_id,
-            "client_secret": client_secret,
+            "client_id": get_secret("STRAVA_CLIENT_ID"),
+            "client_secret": get_secret("STRAVA_CLIENT_SECRET"),
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
         }, timeout=20,
@@ -136,13 +204,11 @@ def strava_exchange_refresh(refresh_token: str) -> Dict:
 
 @st.cache_data(show_spinner=False, ttl=60*60*24)
 def strava_exchange_code(auth_code: str) -> Dict:
-    client_id = get_secret("STRAVA_CLIENT_ID")
-    client_secret = get_secret("STRAVA_CLIENT_SECRET")
     r = requests.post(
         "https://www.strava.com/oauth/token",
         data={
-            "client_id": client_id,
-            "client_secret": client_secret,
+            "client_id": get_secret("STRAVA_CLIENT_ID"),
+            "client_secret": get_secret("STRAVA_CLIENT_SECRET"),
             "code": auth_code,
             "grant_type": "authorization_code",
         }, timeout=20,
@@ -169,6 +235,7 @@ def get_route_meta(access_token: str, route_id: int) -> StravaRoute:
         summary_polyline=poly,
     )
 
+
 def extract_route_id_from_strava_url(url: str) -> Optional[int]:
     try:
         parts = url.strip('/').split('/')
@@ -178,8 +245,9 @@ def extract_route_id_from_strava_url(url: str) -> Optional[int]:
         return None
 
 # =============================
-# Polyline decode & LocationIQ
+# Polyline & LocationIQ
 # =============================
+
 def decode_polyline(encoded: str) -> List[Tuple[float, float]]:
     points = []
     index = lat = lng = 0
@@ -215,14 +283,17 @@ def locationiq_reverse(lat: float, lon: float) -> Optional[Dict]:
     key = get_secret("LOCATIONIQ_API_KEY")
     if not key:
         return None
-    url = "https://us1.locationiq.com/v1/reverse"
-    params = {"key": key, "lat": lat, "lon": lon, "format": "json", "zoom": 17}
     try:
-        r = requests.get(url, params=params, timeout=15)
+        r = requests.get(
+            "https://us1.locationiq.com/v1/reverse",
+            params={"key": key, "lat": lat, "lon": lon, "format": "json", "zoom": 17},
+            timeout=15,
+        )
         r.raise_for_status()
         return r.json()
     except Exception:
         return None
+
 
 def on_route_landmarks(polyline: Optional[str], max_points: int = 8) -> List[str]:
     if not polyline:
@@ -257,71 +328,8 @@ def on_route_landmarks(polyline: Optional[str], max_points: int = 8) -> List[str
     return names
 
 # =============================
-# Message generation – richer variety
+# Message generation
 # =============================
-GREETINGS = [
-    "👋 Hope you're having a great week!",
-    "Hey team!",
-    "Hiya!",
-    "Evening crew!",
-    "Hello runners!",
-    "Ready to run?",
-]
-
-THURSDAY_LEADS = [
-    "Here's what's lined up for Thursday…",
-    "Thursday's nearly here – time to lace up!",
-    "Fancy a Thursday run? Here's the plan…",
-    "This week's routes are looking good:",
-    "Two routes ready for you this Thursday:",
-]
-
-ROUTE_INTROS_GENERAL = [
-    "🛣️ This week we’ve got two route options to choose from:",
-    "🗺️ Pick your route – two options this week:",
-    "🏃 Two choices – take your pick:",
-    "📍 Two routes on offer this Thursday:",
-]
-
-TRAIL_INTROS = [
-    "🌿 Summer trails are calling – expect softer ground and scenery!",
-    "🌳 Trail time! Let's enjoy the paths while the light lasts.",
-    "🟢 Trails this week – watch your footing and enjoy the views.",
-]
-
-ROAD_INTROS = [
-    "🚦 It's road time as the evenings draw in.",
-    "💡 Running after dark means roads this week.",
-    "🛣️ Sticking to the roads tonight for safety.",
-]
-
-SAFETY_NOTES = [
-    "If you’re able to join us, please ensure you have your lights with you and wear hi-vis clothing.",
-    "Please bring a headtorch and wear hi-vis so we can all be seen.",
-    "Pack your lights and pop on some hi‑vis for the darker miles, please.",
-]
-
-OUTROS = [
-    "👟 Grab your shoes, bring your smiles – see you Thursday!",
-    "See you at 7:00pm – let's make it a good one!",
-    "Bring a mate, say hello, and enjoy the miles!",
-    "Happy running – see you soon!",
-]
-
-EVENT_TEMPLATES = {
-    "Social after the run": [
-        "🍻 After the run, many of us are going for drinks and food at the market – come along for a friendly social!",
-        "🍻 Post‑run social at the market – come for a drink and a bite!",
-    ],
-    "Wear it green": [
-        "🟩 It's Mental Health Awareness Week – we're encouraging everyone to wear something green. Afterwards, join us at the market for a relaxed social.",
-        "🟩 Wear something green for Mental Health Awareness Week, and stick around after for a market social.",
-    ],
-    "Pride": [
-        "🏳️‍🌈 Our Pride Run coincides with Manchester Pride – wear something colourful and show your support!",
-        "🏳️‍🌈 Pride week! Bring the colour and the good vibes.",
-    ],
-}
 
 def build_intro(seed: str, terrain: str, special: str) -> str:
     g = seeded_choice(GREETINGS, seed, "greet")
@@ -332,6 +340,7 @@ def build_intro(seed: str, terrain: str, special: str) -> str:
     elif terrain == "road":
         bits.append(seeded_choice(ROAD_INTROS, seed, "road"))
     return " ".join(bits)
+
 
 def special_event_blurb(event_cell: Optional[str], meet_maps: Optional[str], *, seed: str = "") -> str:
     if not event_cell:
@@ -349,6 +358,7 @@ def special_event_blurb(event_cell: Optional[str], meet_maps: Optional[str], *, 
     if not text:
         text.append(f"🎉 This week features: {event_cell}")
     return "\n".join(text)
+
 
 def platform_blocks(
     platform: str,
@@ -435,7 +445,7 @@ def admin_page():
             f"&response_type=code&redirect_uri={app_url}"
             f"&approval_prompt=auto&scope=read,read_all"
         )
-        st.write("1) Set your Strava application's callback URL to your app root (same as above).")
+        st.write("1) Set your Strava application's callback URL to your app root (same as above)." )
         st.code(app_url)
         st.write("2) Click to authorise:")
         st.code(auth_url)
@@ -447,7 +457,6 @@ def admin_page():
         try:
             token_data = strava_exchange_code(auth_code)
             refresh_token = token_data.get("refresh_token")
-            access_token = token_data.get("access_token")
             st.success("Token exchange successful.")
             st.write("Copy this REFRESH TOKEN into Streamlit Secrets as STRAVA_REFRESH_TOKEN:")
             st.code(refresh_token)
@@ -484,12 +493,13 @@ def admin_page():
         except Exception as e:
             st.error(str(e))
 
+
 def generator_page():
     st.title("RunTogether Radcliffe – Weekly Message Generator")
     st.caption("Generates friendly, varied messages for WhatsApp, Facebook, Instagram, and Email.")
 
     with st.expander("Data source", expanded=True):
-        st.write("Reading schedule from `data/RTR route schedule.xlsx` (commit updates to GitHub).")
+        st.write("Reading schedule from `data/RTR route schedule.xlsx` (commit updates to GitHub)." )
 
     try:
         df = load_schedule()
@@ -513,6 +523,11 @@ def generator_page():
 
     terrain_flag = 'trail' if 'trail' in notes.lower() else 'road' if 'after dark' in notes.lower() else ''
 
+    # Options
+    st.sidebar.subheader("Options")
+    include_pois = st.sidebar.checkbox("Include on‑route POIs (LocationIQ)", value=True)
+    allow_manual = st.sidebar.checkbox("Allow manual distance/elevation override", value=True)
+
     base_seed = f"{chosen_date}-{terrain_flag}-{special}"
     if 'var_seed_offset' not in st.session_state:
         st.session_state['var_seed_offset'] = 0
@@ -525,8 +540,9 @@ def generator_page():
         (cell_text(row, '5k Route', '5k route'), cell_text(row, '5k Strava link')),
     ]
 
-    refresh = get_secret("STRAVA_REFRESH_TOKEN")
+    # Get Strava access token if possible
     access = None
+    refresh = get_secret("STRAVA_REFRESH_TOKEN")
     if refresh:
         try:
             td = strava_exchange_refresh(refresh)
@@ -534,11 +550,13 @@ def generator_page():
         except Exception:
             access = None
 
+    # Build routes with meta and POIs
     routes_out: List[Tuple[str, str, float, float, List[str]]] = []
-    for name, url in routes_in:
+    for idx, (name, url) in enumerate(routes_in, start=1):
         km = 0.0
         elev = 0.0
         lms: List[str] = []
+        fetched = False
         if url and access:
             rid = extract_route_id_from_strava_url(url)
             if rid:
@@ -546,10 +564,23 @@ def generator_page():
                     meta = get_route_meta(access, rid)
                     km = meta.distance_km
                     elev = meta.elevation_m
-                    lms = on_route_landmarks(meta.summary_polyline)
+                    if include_pois:
+                        lms = on_route_landmarks(meta.summary_polyline)
+                    fetched = True
                 except Exception:
-                    pass
-        routes_out.append((name, url or "", km, elev, lms))
+                    fetched = False
+        with st.expander(f"{name} – data", expanded=False):
+            st.write(f"Strava link: {url or '(none)'}")
+            st.write("Fetched from Strava:" , "✅" if fetched else "❌")
+            if allow_manual:
+                km = st.number_input(f"{name} distance (km)", min_value=0.0, max_value=100.0, value=float(km), step=0.1, key=f"km_{idx}")
+                elev = st.number_input(f"{name} elevation (m)", min_value=0.0, max_value=5000.0, value=float(elev), step=1.0, key=f"elev_{idx}")
+            if include_pois:
+                if lms:
+                    st.write("POIs:", ", ".join(lms))
+                else:
+                    st.write("POIs:", "(none)")
+        routes_out.append((name, url or "", km, elev, lms if include_pois else []))
 
     intro = build_intro(seed, terrain_flag, special)
     route_intro = seeded_choice(ROUTE_INTROS_GENERAL, seed, "route_intro")
@@ -582,7 +613,7 @@ def generator_page():
         mime="text/plain",
     )
 
-    st.info("URLs are shown in full. WhatsApp uses *bold* for emphasis. Email is plain text only. You can use ‘Shuffle wording’ to try alternative phrasings for the same week.")
+    st.info("URLs are shown in full. WhatsApp uses *bold* for emphasis. Email is plain text only. Use ‘Shuffle wording’ for alternatives. Strava/LocationIQ are cached.")
 
 # =============================
 # App router
@@ -595,6 +626,7 @@ def main():
         admin_page()
     else:
         generator_page()
+
 
 if __name__ == "__main__":
     main()
