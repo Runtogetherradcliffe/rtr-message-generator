@@ -1,12 +1,12 @@
-# RTR Message Generator – GPX Fallback Build
+# RTR Message Generator (query_params build)
 
-Upload GPX per route if Strava isn't returning data. LocationIQ will extract on‑route POIs from GPX coordinates.
+This build updates the Admin OAuth flow to use `st.query_params`.
+Includes Strava distance/elevation, LocationIQ POIs, and varied copy.
 
 ## Run locally
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
-
-## Deploy to Streamlit Cloud
-Push this folder to GitHub, set Secrets (STRAVA_CLIENT_ID/SECRET, LOCATIONIQ_API_KEY, ADMIN_PASS; add STRAVA_REFRESH_TOKEN after OAuth), and deploy.
+## Deploy
+Push to Streamlit Cloud, set Secrets, then do the Strava OAuth once on the Admin page.
