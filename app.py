@@ -1,633 +1,254 @@
-"""
-RunTogether Radcliffe – Weekly Message Generator (Streamlit)
 
-This build replaces the deprecated `st.experimental_get_query_params()` with
-`st.query_params` and makes auth-code extraction robust.
-Also includes:
-- Strava distance/elevation fetch (with manual override)
-- LocationIQ on‑route POIs from Strava polyline (toggle)
-- NaN‑safe spreadsheet parsing
-- Varied copy for WhatsApp/Facebook/Instagram/Email
-"""
-
-from __future__ import annotations
-import os
-import random
-from dataclasses import dataclass
-from datetime import datetime, date, timedelta
-from typing import List, Optional, Dict, Tuple
-
-import pandas as pd
-import requests
+# RTR Message Generator — Platform-specific wording (keeps current preview layout) + Shuffle
 import streamlit as st
-from dateutil import tz
+import pandas as pd
+import random
+import os
 
-# =============================
-# Config shim (Streamlit first)
-# =============================
+# ---- Load spreadsheet (expects data/RTR route schedule.xlsx) ----
+DATA_PATH = os.path.join("data", "RTR route schedule.xlsx")
+try:
+    df = pd.read_excel(DATA_PATH)
+except Exception as e:
+    st.error(f"Could not load spreadsheet at {DATA_PATH}. Please ensure the file exists in the repo. Error: {e}")
+    st.stop()
 
-def get_secret(key: str, default: Optional[str] = None) -> Optional[str]:
-    try:
-        if key in st.secrets:
-            return st.secrets[key]
-    except Exception:
-        pass
-    return os.environ.get(key, default)
+st.title("RTR Message Generator")
 
-UK_TZ = tz.gettz("Europe/London")
-
-# =============================
-# Copy variety helpers
-# =============================
-ELEVATION_TEXT_CHOICES = [
-    (0, 20, [
-        "flat as a pancake 🥞",
-        "pancake-flat",
-        "nice and flat",
-        "no climbs to worry about",
-    ]),
-    (20, 60, [
-        "a gently rolling route 🌿",
-        "soft ups and downs",
-        "a touch of undulation",
-        "lightly rolling",
-    ]),
-    (60, 140, [
-        "some hills this week ⛰️",
-        "a few punchy rises",
-        "rolling with a couple of climbs",
-        "a bit lumpy",
-    ]),
-    (140, 99999, [
-        "hilly – bring your climbing legs! 🧗",
-        "properly hilly",
-        "plenty of climbing on tap",
-        "a big-elevation outing",
-    ]),
-]
-
-def seeded_choice(options: List[str], seed: str, tag: str) -> str:
-    rnd = random.Random(f"{seed}:{tag}")
+# ---------------- Variation helpers & copy pools ----------------
+def seeded_choice(options, seed_str, tag):
+    rnd = random.Random(f"{seed_str}:{tag}")
     return rnd.choice(options)
 
-
-def describe_elevation(total_elev_m: float, *, seed: str = "") -> str:
-    for lo, hi, choices in ELEVATION_TEXT_CHOICES:
-        if lo <= total_elev_m < hi:
-            return seeded_choice(choices, seed, f"elev_{lo}_{hi}")
-    return "varied terrain"
-
-GREETINGS = [
-    "👋 Hope you're having a great week!",
-    "Hey team!",
-    "Hiya!",
-    "Evening crew!",
-    "Hello runners!",
-    "Ready to run?",
+INTRO_WA = [
+    "Evening crew! Fancy a Thursday run? Here's the plan…",
+    "Ready for Thursday miles? Here’s what’s happening…",
+    "Hiya! Plan for this Thursday…",
 ]
-THURSDAY_LEADS = [
-    "Here's what's lined up for Thursday…",
-    "Thursday's nearly here – time to lace up!",
-    "Fancy a Thursday run? Here's the plan…",
-    "This week's routes are looking good:",
-    "Two routes ready for you this Thursday:",
+INTRO_FB = [
+    "Evening crew! Fancy a Thursday run? Here's the plan…",
+    "Hey team — it’s nearly Thursday night run time!",
+    "Hello runners! Here’s what we’ve got lined up…",
 ]
-ROUTE_INTROS_GENERAL = [
-    "🛣️ This week we’ve got two route options to choose from:",
-    "🗺️ Pick your route – two options this week:",
-    "🏃 Two choices – take your pick:",
+INTRO_IG = [
+    "Thursday vibes. Let’s run.",
+    "We run Thursday. You in?",
+    "Ready to roll this Thursday?",
+]
+INTRO_EMAIL = [
+    "Here are the details for Thursday’s run:",
+    "This is the plan for Thursday’s run:",
+    "Thursday run details:",
+]
+
+ROUTES_WA = [
+    "📍 *Two routes on offer this Thursday:*",
+    "🗺️ *Pick from two options this week:*",
+]
+ROUTES_FB = [
     "📍 Two routes on offer this Thursday:",
+    "🗺️ Pick from two options this week:",
 ]
-TRAIL_INTROS = [
-    "🌿 Summer trails are calling – expect softer ground and scenery!",
-    "🌳 Trail time! Let's enjoy the paths while the light lasts.",
-    "🟢 Trails this week – watch your footing and enjoy the views.",
+ROUTES_IG = [
+    "Two routes tonight:",
+    "Pick your route:",
 ]
-ROAD_INTROS = [
-    "🚦 It's road time as the evenings draw in.",
-    "💡 Running after dark means roads this week.",
-    "🛣️ Sticking to the roads tonight for safety.",
+ROUTES_EMAIL = [
+    "Two routes available:",
+    "Routes this week:",
 ]
-SAFETY_NOTES = [
+
+OUTRO_WA = [
+    "Happy running – see you soon!",
+    "👟 See you Thursday!",
+]
+OUTRO_FB = [
+    "Happy running – see you soon!",
+    "Bring a mate, say hello – see you there!",
+]
+OUTRO_IG = [
+    "See you out there ✌️",
+    "Good vibes only ✨",
+]
+OUTRO_EMAIL = [
+    "See you Thursday.",
+    "Thanks, and see you soon.",
+]
+
+SAFETY_LINES = [
     "If you’re able to join us, please ensure you have your lights with you and wear hi-vis clothing.",
     "Please bring a headtorch and wear hi-vis so we can all be seen.",
     "Pack your lights and pop on some hi‑vis for the darker miles, please.",
 ]
-OUTROS = [
-    "👟 Grab your shoes, bring your smiles – see you Thursday!",
-    "See you at 7:00pm – let's make it a good one!",
-    "Bring a mate, say hello, and enjoy the miles!",
-    "Happy running – see you soon!",
-]
-EVENT_TEMPLATES = {
-    "Social after the run": [
-        "🍻 After the run, many of us are going for drinks and food at the market – come along for a friendly social!",
-        "🍻 Post‑run social at the market – come for a drink and a bite!",
-    ],
-    "Wear it green": [
-        "🟩 It's Mental Health Awareness Week – we're encouraging everyone to wear something green. Afterwards, join us at the market for a relaxed social.",
-        "🟩 Wear something green for Mental Health Awareness Week, and stick around after for a market social.",
-    ],
-    "Pride": [
-        "🏳️‍🌈 Our Pride Run coincides with Manchester Pride – wear something colourful and show your support!",
-        "🏳️‍🌈 Pride week! Bring the colour and the good vibes.",
-    ],
-}
 
-# =============================
-# Utilities
-# =============================
+def platform_copy(platform: str, *, seed: str):
+    if platform == "WhatsApp":
+        return {
+            "intro": seeded_choice(INTRO_WA, seed, "intro"),
+            "meet_lbl": "📍 *Meeting at:*",
+            "time_lbl": "🕖 *We set off at 7:00pm*",
+            "routes_lbl": seeded_choice(ROUTES_WA, seed, "routes"),
+            "book_lbl": "📲 Book now:",
+            "cancel_lbl": "❌ Can’t make it? Cancel at least 1 hour before:",
+            "outro": seeded_choice(OUTRO_WA, seed, "outro"),
+            "hashtags": None,
+        }
+    elif platform == "Facebook":
+        return {
+            "intro": seeded_choice(INTRO_FB, seed, "intro"),
+            "meet_lbl": "📍 Meeting at:",
+            "time_lbl": "🕖 We set off at 7:00pm",
+            "routes_lbl": seeded_choice(ROUTES_FB, seed, "routes"),
+            "book_lbl": "📲 Book now:",
+            "cancel_lbl": "❌ Can’t make it? Cancel at least 1 hour before:",
+            "outro": seeded_choice(OUTRO_FB, seed, "outro"),
+            "hashtags": None,
+        }
+    elif platform == "Instagram":
+        return {
+            "intro": seeded_choice(INTRO_IG, seed, "intro"),
+            "meet_lbl": "📍 Meeting at:",
+            "time_lbl": "🕖 7:00pm start",
+            "routes_lbl": seeded_choice(ROUTES_IG, seed, "routes"),
+            "book_lbl": "Book now:",
+            "cancel_lbl": "Can’t make it? Cancel at least 1 hour before:",
+            "outro": seeded_choice(OUTRO_IG, seed, "outro"),
+            "hashtags": " ".join(["#RunTogetherRadcliffe", "#RadcliffeRunners", "#ThursdayRun"]),
+        }
+    else:  # Email
+        return {
+            "intro": seeded_choice(INTRO_EMAIL, seed, "intro"),
+            "meet_lbl": "Meeting at:",
+            "time_lbl": "We set off at 7:00pm",
+            "routes_lbl": seeded_choice(ROUTES_EMAIL, seed, "routes"),
+            "book_lbl": "Book now:",
+            "cancel_lbl": "Can’t make it? Cancel at least 1 hour before:",
+            "outro": seeded_choice(OUTRO_EMAIL, seed, "outro"),
+            "hashtags": None,
+        }
 
-def next_thursday(today: Optional[date] = None) -> date:
-    today = today or datetime.now(UK_TZ).date()
-    days_ahead = (3 - today.weekday()) % 7
-    return today + timedelta(days=days_ahead)
-
-@st.cache_data(show_spinner=False, ttl=600)
-def load_schedule(path: str = "data/RTR route schedule.xlsx") -> pd.DataFrame:
-    df = pd.read_excel(path, sheet_name="schedule")
-    expected = [
-        'Week','Date','Special events','Notes','Meeting point','Meeting point google link',
-        '8k Route','8k Strava link','5k Route','5k Strava link'
-    ]
-    missing = [c for c in expected if c not in df.columns]
-    if missing:
-        raise ValueError(f"Missing expected columns: {missing}")
-    df['Date'] = pd.to_datetime(df['Date']).dt.date
-    return df
-
-# Safe cell read
-
-def cell_text(row: pd.Series, key: str, default: str = "") -> str:
+# ---- Helpers to format date safely ----
+def date_label_from_cell(val):
     try:
-        val = row[key]
+        return val.strftime('%A %d %B %Y') if pd.notnull(val) else ""
     except Exception:
-        val = default
-    if pd.isna(val) or val is None:
-        return default
-    return str(val).strip()
+        return str(val) or ""
 
-# =============================
-# Strava
-# =============================
-STRAVA_BASE = "https://www.strava.com/api/v3"
+# ---- Build date options ----
+date_options = []
+for idx, row in df.iterrows():
+    date_label = date_label_from_cell(row.get("Date"))
+    if date_label:
+        date_options.append((date_label, idx))
 
-@dataclass
-class StravaRoute:
-    id: int
-    name: str
-    distance_km: float
-    elevation_m: float
-    summary_polyline: Optional[str]
+if not date_options:
+    st.warning("No runs found in the spreadsheet.")
+    st.stop()
 
-@st.cache_data(show_spinner=False, ttl=60*60*24)
-def strava_exchange_refresh(refresh_token: str) -> Dict:
-    r = requests.post(
-        "https://www.strava.com/oauth/token",
-        data={
-            "client_id": get_secret("STRAVA_CLIENT_ID"),
-            "client_secret": get_secret("STRAVA_CLIENT_SECRET"),
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-        }, timeout=20,
-    )
-    r.raise_for_status()
-    return r.json()
+labels = [x[0] for x in date_options]
+selected_label = st.selectbox("Choose a date", options=labels, index=0)
+selected_idx = dict(date_options)[selected_label]
+row = df.iloc[selected_idx]
 
-@st.cache_data(show_spinner=False, ttl=60*60*24)
-def strava_exchange_code(auth_code: str) -> Dict:
-    r = requests.post(
-        "https://www.strava.com/oauth/token",
-        data={
-            "client_id": get_secret("STRAVA_CLIENT_ID"),
-            "client_secret": get_secret("STRAVA_CLIENT_SECRET"),
-            "code": auth_code,
-            "grant_type": "authorization_code",
-        }, timeout=20,
-    )
-    r.raise_for_status()
-    return r.json()
+# ---- Pull fields (tolerant of column names) ----
+location = (
+    row.get("Meeting location")
+    or row.get("Meeting point")
+    or "Radcliffe market"
+)
 
-@st.cache_data(show_spinner=False, ttl=60*60*24)
-def get_route_meta(access_token: str, route_id: int) -> StravaRoute:
-    r = requests.get(
-        f"{STRAVA_BASE}/routes/{route_id}",
-        headers={"Authorization": f"Bearer {access_token}"}, timeout=20
-    )
-    r.raise_for_status()
-    data = r.json()
-    dist_km = (data.get("distance", 0) or 0)/1000.0
-    elev_m = data.get("elevation_gain", 0) or 0
-    poly = data.get("map", {}).get("summary_polyline")
-    return StravaRoute(
-        id=int(data.get("id")),
-        name=str(data.get("name")),
-        distance_km=round(dist_km, 1),
-        elevation_m=round(elev_m, 0),
-        summary_polyline=poly,
-    )
+surface = (row.get("Surface") or row.get("Notes") or "").strip()
 
-
-def extract_route_id_from_strava_url(url: str) -> Optional[int]:
+# Extract routes (handle common column names)
+routes = []
+def safe_get(col): 
     try:
-        parts = url.strip('/').split('/')
-        idx = parts.index('routes')
-        return int(parts[idx+1])
+        v = row.get(col)
+        return "" if (v is None or (isinstance(v, float) and pd.isna(v))) else str(v).strip()
     except Exception:
-        return None
-
-# =============================
-# Polyline & LocationIQ
-# =============================
-
-def decode_polyline(encoded: str) -> List[Tuple[float, float]]:
-    points = []
-    index = lat = lng = 0
-    while index < len(encoded):
-        result = 1
-        shift = 0
-        b = 0
-        while True:
-            b = ord(encoded[index]) - 63 - 1
-            index += 1
-            result += b << shift
-            shift += 5
-            if b < 0x1f:
-                break
-        dlat = ~(result >> 1) if (result & 1) else (result >> 1)
-        lat += dlat
-        result = 1
-        shift = 0
-        while True:
-            b = ord(encoded[index]) - 63 - 1
-            index += 1
-            result += b << shift
-            shift += 5
-            if b < 0x1f:
-                break
-        dlng = ~(result >> 1) if (result & 1) else (result >> 1)
-        lng += dlng
-        points.append((lat * 1e-5, lng * 1e-5))
-    return points
-
-@st.cache_data(show_spinner=False, ttl=60*60*24*7)
-def locationiq_reverse(lat: float, lon: float) -> Optional[Dict]:
-    key = get_secret("LOCATIONIQ_API_KEY")
-    if not key:
-        return None
-    try:
-        r = requests.get(
-            "https://us1.locationiq.com/v1/reverse",
-            params={"key": key, "lat": lat, "lon": lon, "format": "json", "zoom": 17},
-            timeout=15,
-        )
-        r.raise_for_status()
-        return r.json()
-    except Exception:
-        return None
-
-
-def on_route_landmarks(polyline: Optional[str], max_points: int = 8) -> List[str]:
-    if not polyline:
-        return []
-    coords = decode_polyline(polyline)
-    if not coords:
-        return []
-    step = max(1, len(coords) // max_points)
-    sampled = coords[::step][:max_points]
-    names: List[str] = []
-    seen = set()
-    for (lat, lon) in sampled:
-        info = locationiq_reverse(lat, lon)
-        if not info:
-            continue
-        props = info.get("address", {})
-        candidates = [
-            props.get("road"), props.get("pedestrian"), props.get("footway"), props.get("path"),
-            props.get("cycleway"), props.get("neighbourhood"), props.get("suburb"), props.get("hamlet"),
-            info.get("display_name")
-        ]
-        name = next((c for c in candidates if c), None)
-        if not name:
-            continue
-        name = str(name).strip()
-        if name.lower() in seen:
-            continue
-        seen.add(name.lower())
-        names.append(name)
-        if len(names) >= max_points:
-            break
-    return names
-
-# =============================
-# Message generation
-# =============================
-
-def build_intro(seed: str, terrain: str, special: str) -> str:
-    g = seeded_choice(GREETINGS, seed, "greet")
-    t = seeded_choice(THURSDAY_LEADS, seed, "lead")
-    bits = [g, t]
-    if terrain == "trail":
-        bits.append(seeded_choice(TRAIL_INTROS, seed, "trail"))
-    elif terrain == "road":
-        bits.append(seeded_choice(ROAD_INTROS, seed, "road"))
-    return " ".join(bits)
-
-
-def special_event_blurb(event_cell: Optional[str], meet_maps: Optional[str], *, seed: str = "") -> str:
-    if not event_cell:
         return ""
-    text: List[str] = []
-    e = event_cell.lower()
-    if "social" in e:
-        text.append(seeded_choice(EVENT_TEMPLATES["Social after the run"], seed, "ev_social"))
-    if "rtr on tour" in e and meet_maps:
-        text.append(f"📍 We're on tour! Tap for the meet point: {meet_maps}")
-    if "wear it green" in e:
-        text.append(seeded_choice(EVENT_TEMPLATES["Wear it green"], seed, "ev_green"))
-    if "pride" in e:
-        text.append(seeded_choice(EVENT_TEMPLATES["Pride"], seed, "ev_pride"))
-    if not text:
-        text.append(f"🎉 This week features: {event_cell}")
-    return "\n".join(text)
 
+# Try standard column set first
+pairs = [
+    ("8k Route","8k Strava link"),
+    ("5k Route","5k Strava link"),
+    ("Route A","Strava A"),
+    ("Route B","Strava B"),
+]
+added = False
+for name_col, url_col in pairs:
+    name = safe_get(name_col); url = safe_get(url_col)
+    if name and url:
+        routes.append((name, url))
+        added = True
 
-def platform_blocks(
-    platform: str,
-    *,
-    intro: str,
-    route_intro: str,
-    meet_point: str,
-    depart_time: str,
-    routes: List[Tuple[str, str, float, float, List[str]]],
-    terrain_flag: str,
-    safety_note: Optional[str],
-    event_text: str,
-    outro: str,
-) -> str:
-    lines: List[str] = []
-    wa_bold = (lambda s: f"*{s}*") if platform == "WhatsApp" else (lambda s: s)
+# If not found, try generic guess (first two stringy columns that look like names/links)
+if not added:
+    # Fall back: scan for any columns with 'Route' in name and next col with 'link'
+    candidates = [c for c in df.columns if 'route' in c.lower()]
+    for c in candidates:
+        urlc = c.replace("Route","Strava link")
+        url = safe_get(urlc)
+        name = safe_get(c)
+        if name and url:
+            routes.append((name, url))
 
-    lines.append(intro)
+# Platform selector + Shuffle
+platform = st.selectbox("Platform", options=["WhatsApp","Facebook","Instagram","Email"], index=0)
+
+if "var_seed_offset" not in st.session_state:
+    st.session_state["var_seed_offset"] = 0
+if st.button("🔀 Shuffle wording"):
+    st.session_state["var_seed_offset"] += 1
+seed = f"{selected_label}|{platform}#{st.session_state['var_seed_offset']}"
+
+# Build preview text (KEEPING YOUR CURRENT LAYOUT)
+cp = platform_copy(platform, seed=seed)
+
+lines = []
+# Intro
+lines.append(cp["intro"])
+lines.append("")
+
+# Meeting + time
+lines.append(f"{cp['meet_lbl']} {location}")
+lines.append(f"{cp['time_lbl']}")
+lines.append("")
+
+# Routes section
+lines.append(cp["routes_lbl"])
+if routes:
+    for name, url in routes:
+        lines.append(f"• {name}: {url}")
+else:
+    lines.append("• (Routes not found in spreadsheet)")
+
+# Safety if after dark
+after_dark = "after dark" in surface.lower()
+if after_dark:
     lines.append("")
-    lines.append(f"📍 Meeting at: {meet_point}")
-    lines.append(f"🕖 We set off at 7:00pm")
-    lines.append("")
-    lines.append(route_intro)
+    lines.append(seeded_choice(SAFETY_LINES, seed, "safety"))
 
-    for label, url, km, elev, landmarks in routes:
-        elev_desc = describe_elevation(elev, seed=intro)
-        lines.append(f"• {label}: {url}")
-        if km and elev is not None:
-            lines.append(f"  {km:.1f} km with {int(elev)}m of elevation – {elev_desc}")
-        if landmarks:
-            lines.append(f"  🏞️ This route passes " + ", ".join(landmarks))
+# Book/cancel
+lines.append("")
+lines.append(f"{cp['book_lbl']} https://groups.runtogether.co.uk/RunTogetherRadcliffe/Runs")
+lines.append(f"{cp['cancel_lbl']} https://groups.runtogether.co.uk/My/BookedRuns")
 
-    if terrain_flag == "road" and safety_note:
-        lines.append("")
-        lines.append(safety_note)
+# Outro (+ hashtags for IG)
+lines.append("")
+lines.append(cp["outro"])
+if cp.get("hashtags"):
+    lines.append(cp["hashtags"])
 
-    if event_text:
-        lines.append("")
-        lines.append(event_text)
+preview = "\n".join(lines)
 
-    lines.append("")
-    lines.append("📲 Book now: https://groups.runtogether.co.uk/RunTogetherRadcliffe/Runs")
-    lines.append("❌ Can’t make it? Cancel at least 1 hour before: https://groups.runtogether.co.uk/My/BookedRuns")
+st.subheader("Preview messages")
+st.selectbox("Platform", options=["WhatsApp","Facebook","Instagram","Email"], index=["WhatsApp","Facebook","Instagram","Email"].index(platform), disabled=True)
+st.text_area("Generated message", value=preview, height=420)
 
-    lines.append("")
-    lines.append(outro)
-
-    text = "\n".join(lines)
-
-    if platform == "Email":
-        return text
-    elif platform == "WhatsApp":
-        text = text.replace("Meeting at:", wa_bold("Meeting at:"))
-        text = text.replace("We set off at 7:00pm", wa_bold("We set off at 7:00pm"))
-        return text
-    elif platform in {"Facebook", "Instagram"}:
-        return text
-    else:
-        return text
-
-# =============================
-# UI – Admin & Generator
-# =============================
-
-def admin_page():
-    st.title("Admin Settings")
-    st.caption("Connect Strava, manage tokens, and test APIs.")
-
-    admin_pass = get_secret("ADMIN_PASS")
-    if admin_pass:
-        pw = st.text_input("Admin password", type="password")
-        if pw != admin_pass:
-            st.stop()
-
-    st.subheader("Strava – OAuth setup")
-    client_id = get_secret("STRAVA_CLIENT_ID")
-    client_secret = get_secret("STRAVA_CLIENT_SECRET")
-    if not (client_id and client_secret):
-        st.warning("Add STRAVA_CLIENT_ID/STRAVA_CLIENT_SECRET in Secrets first.")
-    app_url = st.text_input("Your app URL (exactly as it appears in the browser)")
-    if client_id and app_url:
-        auth_url = (
-            f"https://www.strava.com/oauth/authorize?client_id={client_id}"
-            f"&response_type=code&redirect_uri={app_url}"
-            f"&approval_prompt=auto&scope=read,read_all"
-        )
-        st.write("1) Set your Strava application's callback URL to your app root (same as above).")
-        st.code(app_url)
-        st.write("2) Click to authorise:")
-        st.code(auth_url)
-
-    # --- UPDATED: use st.query_params, robust across versions (str or list[str]) ---
-    qp = st.query_params
-    if "code" in qp:
-        auth_code = qp.get("code")
-        if isinstance(auth_code, list):
-            auth_code = auth_code[0] if auth_code else ""
-        auth_code = str(auth_code or "")
-        st.info("Auth code detected in URL – exchanging for tokens…")
-        try:
-            token_data = strava_exchange_code(auth_code)
-            refresh_token = token_data.get("refresh_token")
-            st.success("Token exchange successful.")
-            st.write("Copy this REFRESH TOKEN into Streamlit Secrets as STRAVA_REFRESH_TOKEN:")
-            st.code(refresh_token)
-            st.write("(After saving secrets, click ‘Rerun’ to use it.)")
-        except Exception as e:
-            st.error(f"Exchange failed: {e}")
-
-    st.divider()
-    st.subheader("LocationIQ")
-    if not get_secret("LOCATIONIQ_API_KEY"):
-        st.warning("Add LOCATIONIQ_API_KEY to Secrets.")
-    else:
-        st.success("LocationIQ key present.")
-
-    st.divider()
-    st.subheader("Test Strava route fetch")
-    refresh = get_secret("STRAVA_REFRESH_TOKEN")
-    rid_input = st.text_input("Strava route URL or ID")
-    if st.button("Fetch route meta") and rid_input:
-        try:
-            route_id = int(rid_input) if rid_input.isdigit() else extract_route_id_from_strava_url(rid_input)
-            if not route_id:
-                st.error("Could not parse route ID.")
-            else:
-                if not refresh:
-                    st.warning("No STRAVA_REFRESH_TOKEN in secrets. Complete OAuth above, then paste it into Secrets.")
-                else:
-                    td = strava_exchange_refresh(refresh)
-                    access = td.get("access_token")
-                    sr = get_route_meta(access, route_id)
-                    st.json(sr.__dict__)
-                    lms = on_route_landmarks(sr.summary_polyline)
-                    st.write("Landmarks:", ", ".join(lms) if lms else "(none)")
-        except Exception as e:
-            st.error(str(e))
-
-
-def generator_page():
-    st.title("RunTogether Radcliffe – Weekly Message Generator")
-    st.caption("Generates friendly, varied messages for WhatsApp, Facebook, Instagram, and Email.")
-
-    with st.expander("Data source", expanded=True):
-        st.write("Reading schedule from `data/RTR route schedule.xlsx` (commit updates to GitHub).")
-
-    try:
-        df = load_schedule()
-    except Exception as e:
-        st.error(f"Could not load schedule: {e}")
-        st.stop()
-
-    dates = sorted(df['Date'].unique())
-    default_date = next_thursday()
-    if default_date not in dates and dates:
-        default_date = dates[0]
-
-    chosen_date = st.selectbox("Pick the run date", options=dates, index=dates.index(default_date) if default_date in dates else 0)
-
-    row = df.loc[df['Date'] == chosen_date].iloc[0]
-
-    meet_point = cell_text(row, 'Meeting point') or 'Radcliffe Market'
-    meet_link  = cell_text(row, 'Meeting point google link')
-    notes      = cell_text(row, 'Notes')
-    special    = cell_text(row, 'Special events')
-
-    terrain_flag = 'trail' if 'trail' in notes.lower() else 'road' if 'after dark' in notes.lower() else ''
-
-    # Options
-    st.sidebar.subheader("Options")
-    include_pois = st.sidebar.checkbox("Include on‑route POIs (LocationIQ)", value=True)
-    allow_manual = st.sidebar.checkbox("Allow manual distance/elevation override", value=True)
-
-    base_seed = f"{chosen_date}-{terrain_flag}-{special}"
-    if 'var_seed_offset' not in st.session_state:
-        st.session_state['var_seed_offset'] = 0
-    if st.button("🔀 Shuffle wording"):
-        st.session_state['var_seed_offset'] += 1
-    seed = f"{base_seed}-#{st.session_state['var_seed_offset']}"
-
-    routes_in = [
-        (cell_text(row, '8k Route', '8k route'), cell_text(row, '8k Strava link')),
-        (cell_text(row, '5k Route', '5k Strava link'), cell_text(row, '5k Strava link')),
-    ]
-    # Correct the tuple to (name, url)
-    routes_in = [
-        (cell_text(row, '8k Route', '8k route'), cell_text(row, '8k Strava link')),
-        (cell_text(row, '5k Route', '5k route'), cell_text(row, '5k Strava link')),
-    ]
-
-    # Get Strava access token if possible
-    access = None
-    refresh = get_secret("STRAVA_REFRESH_TOKEN")
-    if refresh:
-        try:
-            td = strava_exchange_refresh(refresh)
-            access = td.get("access_token")
-        except Exception:
-            access = None
-
-    # Build routes with meta and POIs
-    routes_out: List[Tuple[str, str, float, float, List[str]]] = []
-    for idx, (name, url) in enumerate(routes_in, start=1):
-        km = 0.0
-        elev = 0.0
-        lms: List[str] = []
-        fetched = False
-        if url and access:
-            rid = extract_route_id_from_strava_url(url)
-            if rid:
-                try:
-                    meta = get_route_meta(access, rid)
-                    km = meta.distance_km
-                    elev = meta.elevation_m
-                    if include_pois:
-                        lms = on_route_landmarks(meta.summary_polyline)
-                    fetched = True
-                except Exception:
-                    fetched = False
-        with st.expander(f"{name} – data", expanded=False):
-            st.write(f"Strava link: {url or '(none)'}")
-            st.write("Fetched from Strava:" , "✅" if fetched else "❌")
-            if allow_manual:
-                km = st.number_input(f"{name} distance (km)", min_value=0.0, max_value=100.0, value=float(km), step=0.1, key=f"km_{idx}")
-                elev = st.number_input(f"{name} elevation (m)", min_value=0.0, max_value=5000.0, value=float(elev), step=1.0, key=f"elev_{idx}")
-            if include_pois:
-                if lms:
-                    st.write("POIs:", ", ".join(lms))
-                else:
-                    st.write("POIs:", "(none)")
-        routes_out.append((name, url or "", km, elev, lms if include_pois else []))
-
-    intro = build_intro(seed, terrain_flag, special)
-    route_intro = seeded_choice(ROUTE_INTROS_GENERAL, seed, "route_intro")
-    safety_note = seeded_choice(SAFETY_NOTES, seed, "safety") if terrain_flag == 'road' else None
-    event_text = special_event_blurb(special, meet_link, seed=seed)
-    outro = seeded_choice(OUTROS, seed, "outro")
-
-    st.subheader("Preview messages")
-    platform = st.selectbox("Platform", ["WhatsApp", "Facebook", "Instagram", "Email"], index=0)
-
-    msg = platform_blocks(
-        platform,
-        intro=intro,
-        route_intro=route_intro,
-        meet_point=meet_point,
-        depart_time="7:00pm",
-        routes=routes_out,
-        terrain_flag=terrain_flag,
-        safety_note=safety_note,
-        event_text=event_text,
-        outro=outro,
-    )
-
-    st.text_area("Generated message", value=msg, height=420)
-
-    st.download_button(
-        label="Download message as .txt",
-        data=msg,
-        file_name=f"RTR_{chosen_date}_{platform}.txt",
-        mime="text/plain",
-    )
-
-    st.info("URLs are shown in full. WhatsApp uses *bold* for emphasis. Email is plain text only. Use ‘Shuffle wording’ for alternatives. Strava/LocationIQ are cached.")
-
-# =============================
-# App router
-# =============================
-
-def main():
-    st.set_page_config(page_title="RTR Message Generator", page_icon="🏃", layout="centered")
-    page = st.sidebar.radio("Navigation", ["Generator", "Admin"], index=0)
-    if page == "Admin":
-        admin_page()
-    else:
-        generator_page()
-
-
-if __name__ == "__main__":
-    main()
+st.download_button(
+    "Download message as .txt",
+    data=preview,
+    file_name=f"RTR_{selected_label.replace(' ','_')}_{platform}.txt",
+    mime="text/plain",
+)

@@ -1,12 +1,10 @@
-# RTR Message Generator (query_params build)
+# RTR Message Generator — Platform-specific wording (layout preserved) + Shuffle
 
-This build updates the Admin OAuth flow to use `st.query_params`.
-Includes Strava distance/elevation, LocationIQ POIs, and varied copy.
+Keeps your current preview layout (as in your screenshot) but varies the wording for WhatsApp, Facebook, Instagram, and Email. Includes a Shuffle button for quick phrasing variety.
 
 ## Run locally
-```bash
 pip install -r requirements.txt
 streamlit run app.py
-```
+
 ## Deploy
-Push to Streamlit Cloud, set Secrets, then do the Strava OAuth once on the Admin page.
+Push to GitHub and deploy on Streamlit Community Cloud. Ensure data/RTR route schedule.xlsx is present.
