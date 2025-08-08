@@ -1,1 +1,1 @@
-RTR Message Generator — platform-specific wording + shuffle (fixed widget keys).
+RTR Message Generator — platform-specific wording + shuffle (no read-only Platform widget).

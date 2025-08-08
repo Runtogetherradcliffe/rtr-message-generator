@@ -1,5 +1,5 @@
 
-# RTR Message Generator — Platform-specific wording (layout preserved) + Shuffle (fixed keys)
+# RTR Message Generator — Platform-specific wording + Shuffle (no read-only Platform in preview)
 import streamlit as st
 import pandas as pd
 import random
@@ -26,9 +26,9 @@ INTRO_WA = [
     "Hiya! Plan for this Thursday…",
 ]
 INTRO_FB = [
-    "Evening crew! Fancy a Thursday run? Here's the plan…",
-    "Hey team — it’s nearly Thursday night run time!",
     "Hello runners! Here’s what we’ve got lined up…",
+    "Hey team — it’s nearly Thursday night run time!",
+    "Evening crew! Here’s the plan…",
 ]
 INTRO_IG = [
     "Thursday vibes. Let’s run.",
@@ -171,6 +171,7 @@ for name_col, url_col in pairs:
     if name and url:
         routes.append((name, url))
 
+# Single, interactive Platform control at the top
 platform = st.selectbox("Platform", options=["WhatsApp","Facebook","Instagram","Email"], index=0, key="platform_select")
 
 # Shuffle
@@ -205,8 +206,6 @@ if cp.get("hashtags"):
 preview = "\n".join(lines)
 
 st.subheader("Preview messages")
-# Show the selected platform as a disabled widget with a UNIQUE KEY to avoid duplicate IDs
-st.selectbox("Platform", options=["WhatsApp","Facebook","Instagram","Email"], index=["WhatsApp","Facebook","Instagram","Email"].index(platform), disabled=True, key="platform_preview_ro")
 st.text_area("Generated message", value=preview, height=420, key="preview_text")
 
 st.download_button("Download message as .txt", data=preview, file_name=f"RTR_{selected_label.replace(' ','_')}_{platform}.txt", mime="text/plain", key="download_btn")
