@@ -1,5 +1,6 @@
-# RunTogether Radcliffe – Weekly Message Generator (latest)
+# RTR Message Generator (query_params build)
 
+This build updates the Admin OAuth flow to use `st.query_params`.
 Includes Strava distance/elevation, LocationIQ POIs, and varied copy.
 
 ## Run locally
@@ -7,5 +8,5 @@ Includes Strava distance/elevation, LocationIQ POIs, and varied copy.
 pip install -r requirements.txt
 streamlit run app.py
 ```
-## Deploy to Streamlit Cloud
-Push to GitHub, set Secrets, and deploy. Do Strava OAuth via the Admin page then paste the refresh token into Secrets.
+## Deploy
+Push to Streamlit Cloud, set Secrets, then do the Strava OAuth once on the Admin page.

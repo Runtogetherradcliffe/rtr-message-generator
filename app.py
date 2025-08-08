@@ -1,21 +1,13 @@
 """
 RunTogether Radcliffe – Weekly Message Generator (Streamlit)
 
-Now with:
-- **Strava** distance (km) + elevation (m) fetched per route (with manual fallback)
-- **LocationIQ** on‑route landmarks/POIs from the Strava polyline (optional toggle)
-- Rich, varied copy; WhatsApp/FB/IG/Email formatting; after‑dark safety notes
-- Admin page for OAuth + diagnostics
+This build replaces the deprecated `st.experimental_get_query_params()` with
+`st.query_params` and makes auth-code extraction robust.
+Also includes:
+- Strava distance/elevation fetch (with manual override)
+- LocationIQ on‑route POIs from Strava polyline (toggle)
 - NaN‑safe spreadsheet parsing
-
-Spreadsheet expected at: `data/RTR route schedule.xlsx` (sheet: `schedule`).
-Columns: Week, Date, Special events, Notes, Meeting point, Meeting point google link,
-         8k Route, 8k Strava link, 5k Route, 5k Strava link
-
-Secrets (Streamlit Cloud → App → Settings → Secrets):
-  STRAVA_CLIENT_ID, STRAVA_CLIENT_SECRET, STRAVA_REFRESH_TOKEN (after OAuth),
-  LOCATIONIQ_API_KEY, ADMIN_PASS
-
+- Varied copy for WhatsApp/Facebook/Instagram/Email
 """
 
 from __future__ import annotations
@@ -445,14 +437,18 @@ def admin_page():
             f"&response_type=code&redirect_uri={app_url}"
             f"&approval_prompt=auto&scope=read,read_all"
         )
-        st.write("1) Set your Strava application's callback URL to your app root (same as above)." )
+        st.write("1) Set your Strava application's callback URL to your app root (same as above).")
         st.code(app_url)
         st.write("2) Click to authorise:")
         st.code(auth_url)
 
-    qp = st.experimental_get_query_params()
+    # --- UPDATED: use st.query_params, robust across versions (str or list[str]) ---
+    qp = st.query_params
     if "code" in qp:
-        auth_code = qp["code"][0]
+        auth_code = qp.get("code")
+        if isinstance(auth_code, list):
+            auth_code = auth_code[0] if auth_code else ""
+        auth_code = str(auth_code or "")
         st.info("Auth code detected in URL – exchanging for tokens…")
         try:
             token_data = strava_exchange_code(auth_code)
@@ -499,7 +495,7 @@ def generator_page():
     st.caption("Generates friendly, varied messages for WhatsApp, Facebook, Instagram, and Email.")
 
     with st.expander("Data source", expanded=True):
-        st.write("Reading schedule from `data/RTR route schedule.xlsx` (commit updates to GitHub)." )
+        st.write("Reading schedule from `data/RTR route schedule.xlsx` (commit updates to GitHub).")
 
     try:
         df = load_schedule()
@@ -535,6 +531,11 @@ def generator_page():
         st.session_state['var_seed_offset'] += 1
     seed = f"{base_seed}-#{st.session_state['var_seed_offset']}"
 
+    routes_in = [
+        (cell_text(row, '8k Route', '8k route'), cell_text(row, '8k Strava link')),
+        (cell_text(row, '5k Route', '5k Strava link'), cell_text(row, '5k Strava link')),
+    ]
+    # Correct the tuple to (name, url)
     routes_in = [
         (cell_text(row, '8k Route', '8k route'), cell_text(row, '8k Strava link')),
         (cell_text(row, '5k Route', '5k route'), cell_text(row, '5k Strava link')),
