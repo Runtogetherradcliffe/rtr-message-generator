@@ -1,5 +1,5 @@
 
-# RTR Message Generator — Platform-specific wording (keeps current preview layout) + Shuffle
+# RTR Message Generator — Platform-specific wording (layout preserved) + Shuffle (fixed keys)
 import streamlit as st
 import pandas as pd
 import random
@@ -127,7 +127,6 @@ def platform_copy(platform: str, *, seed: str):
             "hashtags": None,
         }
 
-# ---- Helpers to format date safely ----
 def date_label_from_cell(val):
     try:
         return val.strftime('%A %d %B %Y') if pd.notnull(val) else ""
@@ -146,20 +145,19 @@ if not date_options:
     st.stop()
 
 labels = [x[0] for x in date_options]
-selected_label = st.selectbox("Choose a date", options=labels, index=0)
+selected_label = st.selectbox("Choose a date", options=labels, index=0, key="date_select")
 selected_idx = dict(date_options)[selected_label]
 row = df.iloc[selected_idx]
 
-# ---- Pull fields (tolerant of column names) ----
+# ---- Fields ----
 location = (
     row.get("Meeting location")
     or row.get("Meeting point")
     or "Radcliffe market"
 )
-
 surface = (row.get("Surface") or row.get("Notes") or "").strip()
 
-# Extract routes (handle common column names)
+# Extract routes
 routes = []
 def safe_get(col): 
     try:
@@ -167,74 +165,38 @@ def safe_get(col):
         return "" if (v is None or (isinstance(v, float) and pd.isna(v))) else str(v).strip()
     except Exception:
         return ""
-
-# Try standard column set first
-pairs = [
-    ("8k Route","8k Strava link"),
-    ("5k Route","5k Strava link"),
-    ("Route A","Strava A"),
-    ("Route B","Strava B"),
-]
-added = False
+pairs = [("8k Route","8k Strava link"), ("5k Route","5k Strava link")]
 for name_col, url_col in pairs:
-    name = safe_get(name_col); url = safe_get(url_col)
+    name, url = safe_get(name_col), safe_get(url_col)
     if name and url:
         routes.append((name, url))
-        added = True
 
-# If not found, try generic guess (first two stringy columns that look like names/links)
-if not added:
-    # Fall back: scan for any columns with 'Route' in name and next col with 'link'
-    candidates = [c for c in df.columns if 'route' in c.lower()]
-    for c in candidates:
-        urlc = c.replace("Route","Strava link")
-        url = safe_get(urlc)
-        name = safe_get(c)
-        if name and url:
-            routes.append((name, url))
+platform = st.selectbox("Platform", options=["WhatsApp","Facebook","Instagram","Email"], index=0, key="platform_select")
 
-# Platform selector + Shuffle
-platform = st.selectbox("Platform", options=["WhatsApp","Facebook","Instagram","Email"], index=0)
-
+# Shuffle
 if "var_seed_offset" not in st.session_state:
     st.session_state["var_seed_offset"] = 0
-if st.button("🔀 Shuffle wording"):
+if st.button("🔀 Shuffle wording", key="shuffle_btn"):
     st.session_state["var_seed_offset"] += 1
 seed = f"{selected_label}|{platform}#{st.session_state['var_seed_offset']}"
 
-# Build preview text (KEEPING YOUR CURRENT LAYOUT)
+# Build preview (layout preserved)
 cp = platform_copy(platform, seed=seed)
-
 lines = []
-# Intro
-lines.append(cp["intro"])
-lines.append("")
-
-# Meeting + time
+lines.append(cp["intro"]); lines.append("")
 lines.append(f"{cp['meet_lbl']} {location}")
-lines.append(f"{cp['time_lbl']}")
-lines.append("")
-
-# Routes section
+lines.append(f"{cp['time_lbl']}"); lines.append("")
 lines.append(cp["routes_lbl"])
 if routes:
     for name, url in routes:
         lines.append(f"• {name}: {url}")
 else:
     lines.append("• (Routes not found in spreadsheet)")
-
-# Safety if after dark
-after_dark = "after dark" in surface.lower()
-if after_dark:
-    lines.append("")
-    lines.append(seeded_choice(SAFETY_LINES, seed, "safety"))
-
-# Book/cancel
+if "after dark" in surface.lower():
+    lines.append(""); lines.append(seeded_choice(SAFETY_LINES, seed, "safety"))
 lines.append("")
 lines.append(f"{cp['book_lbl']} https://groups.runtogether.co.uk/RunTogetherRadcliffe/Runs")
 lines.append(f"{cp['cancel_lbl']} https://groups.runtogether.co.uk/My/BookedRuns")
-
-# Outro (+ hashtags for IG)
 lines.append("")
 lines.append(cp["outro"])
 if cp.get("hashtags"):
@@ -243,12 +205,8 @@ if cp.get("hashtags"):
 preview = "\n".join(lines)
 
 st.subheader("Preview messages")
-st.selectbox("Platform", options=["WhatsApp","Facebook","Instagram","Email"], index=["WhatsApp","Facebook","Instagram","Email"].index(platform), disabled=True)
-st.text_area("Generated message", value=preview, height=420)
+# Show the selected platform as a disabled widget with a UNIQUE KEY to avoid duplicate IDs
+st.selectbox("Platform", options=["WhatsApp","Facebook","Instagram","Email"], index=["WhatsApp","Facebook","Instagram","Email"].index(platform), disabled=True, key="platform_preview_ro")
+st.text_area("Generated message", value=preview, height=420, key="preview_text")
 
-st.download_button(
-    "Download message as .txt",
-    data=preview,
-    file_name=f"RTR_{selected_label.replace(' ','_')}_{platform}.txt",
-    mime="text/plain",
-)
+st.download_button("Download message as .txt", data=preview, file_name=f"RTR_{selected_label.replace(' ','_')}_{platform}.txt", mime="text/plain", key="download_btn")
