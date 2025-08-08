@@ -1,12 +1,11 @@
-# RTR Message Generator (query_params build)
+# RunTogether Radcliffe – Weekly Message Generator
 
-This build updates the Admin OAuth flow to use `st.query_params`.
-Includes Strava distance/elevation, LocationIQ POIs, and varied copy.
+This app generates varied, friendly messages for the weekly running group.
 
-## Run locally
+## Running locally
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
-## Deploy
-Push to Streamlit Cloud, set Secrets, then do the Strava OAuth once on the Admin page.
+## Deploying to Streamlit Cloud
+Push to GitHub, create an app in Streamlit Cloud, set secrets, and deploy.
