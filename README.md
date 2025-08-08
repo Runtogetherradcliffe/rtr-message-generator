@@ -1,1 +1,1 @@
-RTR Message Generator — future dates only (from next Thursday), labeled 8k/5k routes, and '(or Jeff it!)' on 5k. Platform-specific wording + shuffle.
+RTR Message Generator — future dates; 8k/5k bullets (+ Jeff it! on 5k); platform-specific wording + shuffle; RESTORED special events + RTR on tour map link.

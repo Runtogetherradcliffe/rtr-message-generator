@@ -1,9 +1,9 @@
 
 # RTR Message Generator — platform-specific wording + shuffle
-# Tweaks:
+# Plus:
 # - Only show dates from NEXT THURSDAY onward
-# - Label routes as 8k / 5k from the spreadsheet
-# - Append "(or Jeff it!)" to the 5k route text
+# - Label routes as 8k / 5k from the spreadsheet, add "(or Jeff it!)" to 5k
+# - Restore special events messaging (Pride, Wear it green, Social, RTR on tour + Google Maps link)
 import streamlit as st
 import pandas as pd
 import random
@@ -30,9 +30,8 @@ def next_thursday(today: date | None = None) -> date:
         today = date.today()
     # Monday=0 ... Sunday=6; Thursday is 3
     days_ahead = (3 - today.weekday()) % 7
-    # If today is Thursday, we still want *next* Thursday
     if days_ahead == 0:
-        days_ahead = 7
+        days_ahead = 7  # force NEXT Thursday
     return today + timedelta(days=days_ahead)
 
 def date_label_from_cell(val):
@@ -40,6 +39,15 @@ def date_label_from_cell(val):
         return val.strftime('%A %d %B %Y') if pd.notnull(val) else ""
     except Exception:
         return str(val) or ""
+
+def safe_get(row, col):
+    try:
+        v = row.get(col)
+        if v is None: return ""
+        if isinstance(v, float) and pd.isna(v): return ""
+        return str(v).strip()
+    except Exception:
+        return ""
 
 # ---------------- Copy pools ----------------
 INTRO_WA = [
@@ -103,6 +111,20 @@ SAFETY_LINES = [
     "Pack your lights and pop on some hi‑vis for the darker miles, please.",
 ]
 
+# Special events templates
+EVT_SOCIAL = [
+    "🍻 After the run, many of us are going for drinks and food at the market – come along for a friendly social!",
+    "🍻 Post‑run social at the market – grab a drink and a bite with us!",
+]
+EVT_GREEN = [
+    "🟩 It's Mental Health Awareness Week – please wear something green. We’ll also have a relaxed social at the market afterwards.",
+    "🟩 Wear something green for Mental Health Awareness Week, and stick around after for a market social.",
+]
+EVT_PRIDE = [
+    "🏳️‍🌈 Our Pride run coincides with Manchester Pride – wear something colourful and bring the good vibes!",
+    "🏳️‍🌈 Pride week! Bright kit encouraged – let’s celebrate together.",
+]
+
 def platform_copy(platform: str, *, seed: str):
     if platform == "WhatsApp":
         return {
@@ -114,6 +136,7 @@ def platform_copy(platform: str, *, seed: str):
             "cancel_lbl": "❌ Can’t make it? Cancel at least 1 hour before:",
             "outro": seeded_choice(OUTRO_WA, seed, "outro"),
             "hashtags": None,
+            "allow_emoji": True,
         }
     elif platform == "Facebook":
         return {
@@ -125,6 +148,7 @@ def platform_copy(platform: str, *, seed: str):
             "cancel_lbl": "❌ Can’t make it? Cancel at least 1 hour before:",
             "outro": seeded_choice(OUTRO_FB, seed, "outro"),
             "hashtags": None,
+            "allow_emoji": True,
         }
     elif platform == "Instagram":
         return {
@@ -136,6 +160,7 @@ def platform_copy(platform: str, *, seed: str):
             "cancel_lbl": "Can’t make it? Cancel at least 1 hour before:",
             "outro": seeded_choice(OUTRO_IG, seed, "outro"),
             "hashtags": " ".join(["#RunTogetherRadcliffe", "#RadcliffeRunners", "#ThursdayRun"]),
+            "allow_emoji": True,
         }
     else:  # Email
         return {
@@ -147,10 +172,54 @@ def platform_copy(platform: str, *, seed: str):
             "cancel_lbl": "Can’t make it? Cancel at least 1 hour before:",
             "outro": seeded_choice(OUTRO_EMAIL, seed, "outro"),
             "hashtags": None,
+            "allow_emoji": False,
         }
 
+def special_event_lines(platform: str, special_raw: str, meeting_point: str, maps_link: str, *, seed: str):
+    """Return a list of lines to insert for special events."""
+    if not special_raw:
+        return []
+    s = special_raw.lower()
+    lines = []
+
+    # Social after the run
+    if "social after the run" in s or "social" in s:
+        lines.append(seeded_choice(EVT_SOCIAL, seed, "ev_social"))
+
+    # Wear it green
+    if "wear it green" in s or "mental health awareness" in s:
+        lines.append(seeded_choice(EVT_GREEN, seed, "ev_green"))
+
+    # Pride
+    if "pride" in s:
+        lines.append(seeded_choice(EVT_PRIDE, seed, "ev_pride"))
+
+    # RTR on tour
+    if "rtr on tour" in s or "on tour" in s:
+        mp = meeting_point or "the listed meet location"
+        if maps_link:
+            if platform == "Email":
+                lines.append(f"We’re on tour – meet at {mp}. Map: {maps_link}")
+            else:
+                pin = "📍 " if platform != "Email" else ""
+                lines.append(f"{pin}We’re on tour! Meet at {mp}. Map: {maps_link}")
+        else:
+            if platform == "Email":
+                lines.append(f"We’re on tour – meet at {mp}.")
+            else:
+                pin = "📍 " if platform != "Email" else ""
+                lines.append(f"{pin}We’re on tour! Meet at {mp}.")
+
+    # If none matched, just echo
+    if not lines and special_raw.strip():
+        if platform == "Email":
+            lines.append(f"This week features: {special_raw}")
+        else:
+            lines.append(f"🎉 This week features: {special_raw}")
+
+    return lines
+
 # ---------------- Build date options (future only) ----------------
-# Convert Date column to date (if it's datetime)
 df_dates = df.copy()
 if "Date" in df_dates.columns:
     try:
@@ -173,23 +242,18 @@ selected_idx = labels.index(selected_label)
 row = future_df.iloc[selected_idx]
 
 # ---------------- Fields ----------------
-location = (
-    row.get("Meeting location")
-    or row.get("Meeting point")
+meeting_point = (
+    safe_get(row, "Meeting location")
+    or safe_get(row, "Meeting point")
     or "Radcliffe market"
 )
-surface = (row.get("Surface") or row.get("Notes") or "").strip()
+maps_link = safe_get(row, "Meeting point google link") or safe_get(row, "Meeting location google link")
+surface = (safe_get(row, "Surface") or safe_get(row, "Notes"))
+special = safe_get(row, "Special events")
 
-# Extract 8k and 5k routes explicitly so we can label bullets
-def safe_get(col): 
-    try:
-        v = row.get(col)
-        return "" if (v is None or (isinstance(v, float) and pd.isna(v))) else str(v).strip()
-    except Exception:
-        return ""
-
-r8_name = safe_get("8k Route"); r8_link = safe_get("8k Strava link")
-r5_name = safe_get("5k Route"); r5_link = safe_get("5k Strava link")
+# Extract 8k and 5k routes explicitly
+r8_name = safe_get(row, "8k Route"); r8_link = safe_get(row, "8k Strava link")
+r5_name = safe_get(row, "5k Route"); r5_link = safe_get(row, "5k Strava link")
 
 routes = []
 if r8_name and r8_link:
@@ -211,7 +275,7 @@ seed = f"{selected_label}|{platform}#{st.session_state['var_seed_offset']}"
 cp = platform_copy(platform, seed=seed)
 lines = []
 lines.append(cp["intro"]); lines.append("")
-lines.append(f"{cp['meet_lbl']} {location}")
+lines.append(f"{cp['meet_lbl']} {meeting_point}")
 lines.append(f"{cp['time_lbl']}"); lines.append("")
 lines.append(cp["routes_lbl"])
 
@@ -224,10 +288,18 @@ if routes:
 else:
     lines.append("• (Routes not found in spreadsheet)")
 
+# Safety if after dark
 if "after dark" in surface.lower():
     lines.append("")
     lines.append(seeded_choice(SAFETY_LINES, seed, "safety"))
 
+# Special events (restored)
+ev_lines = special_event_lines(platform, special, meeting_point, maps_link, seed=seed)
+if ev_lines:
+    lines.append("")
+    lines.extend(ev_lines)
+
+# Book/cancel
 lines.append("")
 lines.append(f"{cp['book_lbl']} https://groups.runtogether.co.uk/RunTogetherRadcliffe/Runs")
 lines.append(f"{cp['cancel_lbl']} https://groups.runtogether.co.uk/My/BookedRuns")
