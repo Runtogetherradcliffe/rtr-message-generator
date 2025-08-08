@@ -1,38 +1,8 @@
 """
 RunTogether Radcliffe – Weekly Message Generator (Streamlit)
 
-Portable: Streamlit Cloud (free) now, easy to move to Render later.
-
-How secrets are read (Streamlit Cloud):
-  - st.secrets["STRAVA_CLIENT_ID"]
-  - st.secrets["STRAVA_CLIENT_SECRET"]
-  - st.secrets["STRAVA_REFRESH_TOKEN"]   # Paste this manually AFTER first OAuth
-  - st.secrets["LOCATIONIQ_API_KEY"]
-  - st.secrets["ADMIN_PASS"]             # Simple admin gate
-
-⚠️ Strava refresh token workflow on Streamlit Cloud
-  Streamlit secrets are read-only at runtime, so we CANNOT write your refresh token into
-  st.secrets programmatically. The Admin page helps you perform OAuth and DISPLAYS the
-  resulting refresh token so you can copy/paste it into the Secrets panel. After you
-  paste & save in Streamlit → Deploy, the app will pick it up for normal use.
-
-Callback URL for Strava (recommended for Streamlit Cloud):
-  Use the app root URL, e.g.:
-    https://<your-app-subdomain>.streamlit.app
-  Strava will redirect there with `?code=...&scope=...`. The Admin page reads that code.
-
-Spreadsheet location: place your file at `data/RTR route schedule.xlsx` in the repo.
-
-To run locally:
-  streamlit run app.py
-
-To deploy on Streamlit Cloud:
-  - Push repo to GitHub
-  - Create app in Streamlit Cloud → set Secrets → Deploy
-
-Porting to Render later:
-  - Secrets can be read from env vars via the get_secret() shim below.
-  - Set callback URL to https://<your-app>.onrender.com
+This version includes NaN-safe handling for spreadsheet cells to prevent
+AttributeError on weeks where cells are blank (e.g., Special events).
 """
 
 from __future__ import annotations
@@ -67,7 +37,6 @@ def get_secret(key: str, default: Optional[str] = None) -> Optional[str]:
 # =============================
 UK_TZ = tz.gettz("Europe/London")
 
-# Multiple choices per elevation band for variety
 ELEVATION_TEXT_CHOICES = [
     (0, 20, [
         "flat as a pancake 🥞",
@@ -110,13 +79,22 @@ def next_thursday(today: Optional[date] = None) -> date:
     days_ahead = (3 - today.weekday()) % 7  # Monday=0 ... Thursday=3
     return today + timedelta(days=days_ahead)
 
+def cell_text(row: pd.Series, key: str, default: str = "") -> str:
+    """Safely extract text from a row; returns '' for NaN/None."""
+    try:
+        val = row.get(key, default)
+    except Exception:
+        val = default
+    if pd.isna(val) or val is None:
+        return default
+    return str(val).strip()
+
 # =============================
 # Sheet loading & parsing
 # =============================
 @st.cache_data(show_spinner=False, ttl=600)
 def load_schedule(path: str = "data/RTR route schedule.xlsx") -> pd.DataFrame:
     df = pd.read_excel(path, sheet_name="schedule")
-    # Normalise column names exactly as expected
     expected = [
         'Week','Date','Special events','Notes','Meeting point','Meeting point google link',
         '8k Route','8k Strava link','5k Route','5k Strava link'
@@ -124,7 +102,6 @@ def load_schedule(path: str = "data/RTR route schedule.xlsx") -> pd.DataFrame:
     missing = [c for c in expected if c not in df.columns]
     if missing:
         raise ValueError(f"Missing expected columns: {missing}")
-    # Ensure Date is a date
     df['Date'] = pd.to_datetime(df['Date']).dt.date
     return df
 
@@ -175,19 +152,15 @@ def strava_exchange_code(auth_code: str) -> Dict:
 
 @st.cache_data(show_spinner=False, ttl=60*60*24)
 def get_route_meta(access_token: str, route_id: int) -> StravaRoute:
-    # GET /routes/{id}
     r = requests.get(
         f"{STRAVA_BASE}/routes/{route_id}",
         headers={"Authorization": f"Bearer {access_token}"}, timeout=20
     )
     r.raise_for_status()
     data = r.json()
-    # Data fields: distance (m), elevation_gain (m), map.summary_polyline, name, id
     dist_km = (data.get("distance", 0) or 0)/1000.0
     elev_m = data.get("elevation_gain", 0) or 0
-    poly = None
-    if data.get("map"):
-        poly = data["map"].get("summary_polyline")
+    poly = data.get("map", {}).get("summary_polyline")
     return StravaRoute(
         id=int(data.get("id")),
         name=str(data.get("name")),
@@ -197,7 +170,6 @@ def get_route_meta(access_token: str, route_id: int) -> StravaRoute:
     )
 
 def extract_route_id_from_strava_url(url: str) -> Optional[int]:
-    # Expect formats like https://www.strava.com/routes/123456789
     try:
         parts = url.strip('/').split('/')
         idx = parts.index('routes')
@@ -208,9 +180,6 @@ def extract_route_id_from_strava_url(url: str) -> Optional[int]:
 # =============================
 # Polyline decode & LocationIQ
 # =============================
-# Polyline decoding (Google/Strava encoded polyline)
-# Lightweight implementation to avoid extra deps.
-
 def decode_polyline(encoded: str) -> List[Tuple[float, float]]:
     points = []
     index = lat = lng = 0
@@ -247,13 +216,7 @@ def locationiq_reverse(lat: float, lon: float) -> Optional[Dict]:
     if not key:
         return None
     url = "https://us1.locationiq.com/v1/reverse"
-    params = {
-        "key": key,
-        "lat": lat,
-        "lon": lon,
-        "format": "json",
-        "zoom": 17,
-    }
+    params = {"key": key, "lat": lat, "lon": lon, "format": "json", "zoom": 17}
     try:
         r = requests.get(url, params=params, timeout=15)
         r.raise_for_status()
@@ -262,7 +225,6 @@ def locationiq_reverse(lat: float, lon: float) -> Optional[Dict]:
         return None
 
 def on_route_landmarks(polyline: Optional[str], max_points: int = 8) -> List[str]:
-    """Sample along the route and reverse geocode. Returns concise, on-route names."""
     if not polyline:
         return []
     coords = decode_polyline(polyline)
@@ -276,7 +238,6 @@ def on_route_landmarks(polyline: Optional[str], max_points: int = 8) -> List[str
         info = locationiq_reverse(lat, lon)
         if not info:
             continue
-        # Prefer road/path/poi names directly on location
         props = info.get("address", {})
         candidates = [
             props.get("road"), props.get("pedestrian"), props.get("footway"), props.get("path"),
@@ -402,7 +363,6 @@ def platform_blocks(
     event_text: str,
     outro: str,
 ) -> str:
-    # routes: list of (label, url, km, elev_m, landmarks)
     lines: List[str] = []
     wa_bold = (lambda s: f"*{s}*") if platform == "WhatsApp" else (lambda s: s)
 
@@ -439,15 +399,12 @@ def platform_blocks(
     text = "\n".join(lines)
 
     if platform == "Email":
-        # Plain text only (already plain)
         return text
     elif platform == "WhatsApp":
-        # Emphasise key bits using *bold*
         text = text.replace("Meeting at:", wa_bold("Meeting at:"))
         text = text.replace("We set off at 7:00pm", wa_bold("We set off at 7:00pm"))
         return text
     elif platform in {"Facebook", "Instagram"}:
-        # Emojis/Unicode fine; avoid fancy formatting
         return text
     else:
         return text
@@ -460,7 +417,6 @@ def admin_page():
     st.title("Admin Settings")
     st.caption("Connect Strava, manage tokens, and test APIs.")
 
-    # Simple gate
     admin_pass = get_secret("ADMIN_PASS")
     if admin_pass:
         pw = st.text_input("Admin password", type="password")
@@ -541,7 +497,6 @@ def generator_page():
         st.error(f"Could not load schedule: {e}")
         st.stop()
 
-    # Choose a date (default: next Thursday if present)
     dates = sorted(df['Date'].unique())
     default_date = next_thursday()
     if default_date not in dates and dates:
@@ -551,14 +506,13 @@ def generator_page():
 
     row = df.loc[df['Date'] == chosen_date].iloc[0]
 
-    meet_point = row.get('Meeting point') or 'Radcliffe Market'
-    meet_link = row.get('Meeting point google link') or ''
-    notes = (row.get('Notes') or '').strip()
-    special = (row.get('Special events') or '').strip()
+    meet_point = cell_text(row, 'Meeting point') or 'Radcliffe Market'
+    meet_link  = cell_text(row, 'Meeting point google link')
+    notes      = cell_text(row, 'Notes')
+    special    = cell_text(row, 'Special events')
 
     terrain_flag = 'trail' if 'trail' in notes.lower() else 'road' if 'after dark' in notes.lower() else ''
 
-    # Variation seed: date + terrain + special, plus optional shuffle offset
     base_seed = f"{chosen_date}-{terrain_flag}-{special}"
     if 'var_seed_offset' not in st.session_state:
         st.session_state['var_seed_offset'] = 0
@@ -567,8 +521,8 @@ def generator_page():
     seed = f"{base_seed}-#{st.session_state['var_seed_offset']}"
 
     routes_in = [
-        (row.get('8k Route'), row.get('8k Strava link')),
-        (row.get('5k Route'), row.get('5k Strava link')),
+        (cell_text(row, '8k Route', '8k route'), cell_text(row, '8k Strava link')),
+        (cell_text(row, '5k Route', '5k route'), cell_text(row, '5k Strava link')),
     ]
 
     refresh = get_secret("STRAVA_REFRESH_TOKEN")
@@ -582,7 +536,6 @@ def generator_page():
 
     routes_out: List[Tuple[str, str, float, float, List[str]]] = []
     for name, url in routes_in:
-        name = name or "Route"
         km = 0.0
         elev = 0.0
         lms: List[str] = []
@@ -637,14 +590,11 @@ def generator_page():
 
 def main():
     st.set_page_config(page_title="RTR Message Generator", page_icon="🏃", layout="centered")
-
     page = st.sidebar.radio("Navigation", ["Generator", "Admin"], index=0)
-
     if page == "Admin":
         admin_page()
     else:
         generator_page()
-
 
 if __name__ == "__main__":
     main()
