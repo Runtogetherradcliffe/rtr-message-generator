@@ -1,9 +1,14 @@
 
-# RTR Message Generator — Platform-specific wording + Shuffle (no read-only Platform in preview)
+# RTR Message Generator — platform-specific wording + shuffle
+# Tweaks:
+# - Only show dates from NEXT THURSDAY onward
+# - Label routes as 8k / 5k from the spreadsheet
+# - Append "(or Jeff it!)" to the 5k route text
 import streamlit as st
 import pandas as pd
 import random
 import os
+from datetime import date, timedelta
 
 # ---- Load spreadsheet (expects data/RTR route schedule.xlsx) ----
 DATA_PATH = os.path.join("data", "RTR route schedule.xlsx")
@@ -15,11 +20,28 @@ except Exception as e:
 
 st.title("RTR Message Generator")
 
-# ---------------- Variation helpers & copy pools ----------------
+# ---------------- Helpers ----------------
 def seeded_choice(options, seed_str, tag):
     rnd = random.Random(f"{seed_str}:{tag}")
     return rnd.choice(options)
 
+def next_thursday(today: date | None = None) -> date:
+    if today is None:
+        today = date.today()
+    # Monday=0 ... Sunday=6; Thursday is 3
+    days_ahead = (3 - today.weekday()) % 7
+    # If today is Thursday, we still want *next* Thursday
+    if days_ahead == 0:
+        days_ahead = 7
+    return today + timedelta(days=days_ahead)
+
+def date_label_from_cell(val):
+    try:
+        return val.strftime('%A %d %B %Y') if pd.notnull(val) else ""
+    except Exception:
+        return str(val) or ""
+
+# ---------------- Copy pools ----------------
 INTRO_WA = [
     "Evening crew! Fancy a Thursday run? Here's the plan…",
     "Ready for Thursday miles? Here’s what’s happening…",
@@ -127,29 +149,30 @@ def platform_copy(platform: str, *, seed: str):
             "hashtags": None,
         }
 
-def date_label_from_cell(val):
+# ---------------- Build date options (future only) ----------------
+# Convert Date column to date (if it's datetime)
+df_dates = df.copy()
+if "Date" in df_dates.columns:
     try:
-        return val.strftime('%A %d %B %Y') if pd.notnull(val) else ""
+        df_dates["Date"] = pd.to_datetime(df_dates["Date"]).dt.date
     except Exception:
-        return str(val) or ""
+        pass
 
-# ---- Build date options ----
-date_options = []
-for idx, row in df.iterrows():
-    date_label = date_label_from_cell(row.get("Date"))
-    if date_label:
-        date_options.append((date_label, idx))
+nt = next_thursday()
+mask = (df_dates["Date"] >= nt)
+future_df = df_dates.loc[mask].reset_index(drop=True)
 
-if not date_options:
-    st.warning("No runs found in the spreadsheet.")
+if future_df.empty:
+    st.warning("No future runs found from next Thursday onwards.")
     st.stop()
 
+date_options = [(date_label_from_cell(d), i) for i, d in enumerate(future_df["Date"])]
 labels = [x[0] for x in date_options]
 selected_label = st.selectbox("Choose a date", options=labels, index=0, key="date_select")
-selected_idx = dict(date_options)[selected_label]
-row = df.iloc[selected_idx]
+selected_idx = labels.index(selected_label)
+row = future_df.iloc[selected_idx]
 
-# ---- Fields ----
+# ---------------- Fields ----------------
 location = (
     row.get("Meeting location")
     or row.get("Meeting point")
@@ -157,21 +180,24 @@ location = (
 )
 surface = (row.get("Surface") or row.get("Notes") or "").strip()
 
-# Extract routes
-routes = []
+# Extract 8k and 5k routes explicitly so we can label bullets
 def safe_get(col): 
     try:
         v = row.get(col)
         return "" if (v is None or (isinstance(v, float) and pd.isna(v))) else str(v).strip()
     except Exception:
         return ""
-pairs = [("8k Route","8k Strava link"), ("5k Route","5k Strava link")]
-for name_col, url_col in pairs:
-    name, url = safe_get(name_col), safe_get(url_col)
-    if name and url:
-        routes.append((name, url))
 
-# Single, interactive Platform control at the top
+r8_name = safe_get("8k Route"); r8_link = safe_get("8k Strava link")
+r5_name = safe_get("5k Route"); r5_link = safe_get("5k Strava link")
+
+routes = []
+if r8_name and r8_link:
+    routes.append(("8k", r8_name, r8_link))
+if r5_name and r5_link:
+    routes.append(("5k", r5_name, r5_link))
+
+# ---------------- UI controls ----------------
 platform = st.selectbox("Platform", options=["WhatsApp","Facebook","Instagram","Email"], index=0, key="platform_select")
 
 # Shuffle
@@ -181,20 +207,27 @@ if st.button("🔀 Shuffle wording", key="shuffle_btn"):
     st.session_state["var_seed_offset"] += 1
 seed = f"{selected_label}|{platform}#{st.session_state['var_seed_offset']}"
 
-# Build preview (layout preserved)
+# ---------------- Build preview (layout preserved) ----------------
 cp = platform_copy(platform, seed=seed)
 lines = []
 lines.append(cp["intro"]); lines.append("")
 lines.append(f"{cp['meet_lbl']} {location}")
 lines.append(f"{cp['time_lbl']}"); lines.append("")
 lines.append(cp["routes_lbl"])
+
 if routes:
-    for name, url in routes:
-        lines.append(f"• {name}: {url}")
+    for label, name, url in routes:
+        if label == "5k":
+            lines.append(f"• {label} – {name}: {url} (or Jeff it!)")
+        else:
+            lines.append(f"• {label} – {name}: {url}")
 else:
     lines.append("• (Routes not found in spreadsheet)")
+
 if "after dark" in surface.lower():
-    lines.append(""); lines.append(seeded_choice(SAFETY_LINES, seed, "safety"))
+    lines.append("")
+    lines.append(seeded_choice(SAFETY_LINES, seed, "safety"))
+
 lines.append("")
 lines.append(f"{cp['book_lbl']} https://groups.runtogether.co.uk/RunTogetherRadcliffe/Runs")
 lines.append(f"{cp['cancel_lbl']} https://groups.runtogether.co.uk/My/BookedRuns")
